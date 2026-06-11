@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ad Campaign Admin - Krishi Baba</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f7fa;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        header {
+            background: linear-gradient(135deg, #66BB6A, #4CAF50);
+            color: white;
+            padding: 30px;
+            border-radius: 12px;
+            margin-bottom: 30px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        header h1 {
+            font-size: 28px;
+            margin-bottom: 8px;
+        }
+        
+        header p {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+        
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+        }
+        
+        .card h2 {
+            font-size: 20px;
+            margin-bottom: 20px;
+            color: #333;
+        }
+        
+        .form-group {
+            margin-bottom: 16px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 500;
+            color: #555;
+            font-size: 14px;
+        }
+        
+        input, textarea, select {
+            width: 100%;
+            padding: 10px 14px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        
+        input:focus, textarea:focus {
+            outline: none;
+            border-color: #66BB6A;
+        }
+        
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+        
+        .btn {
+            background: #66BB6A;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        
+        .btn:hover {
+            background: #4CAF50;
+        }
+        
+        .campaign-list {
+            margin-top: 20px;
+        }
+        
+        .campaign-item {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 12px;
+        }
+        
+        .campaign-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: start;
+            margin-bottom: 12px;
+        }
+        
+        .campaign-title {
+            font-size: 16px;
+            font-weight: 600;
+            color: #111;
+        }
+        
+        .campaign-status {
+            background: #10B981;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        
+        .campaign-status.inactive {
+            background: #EF4444;
+        }
+        
+        .campaign-keywords {
+            color: #666;
+            font-size: 13px;
+            margin-bottom: 8px;
+        }
+        
+        .campaign-message {
+            color: #444;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+        }
+        
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: #66BB6A;
+            margin-bottom: 4px;
+        }
+        
+        .stat-label {
+            color: #666;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📢 Ad Campaign Manager</h1>
+            <p>Create keyword-triggered ads for Krishi Baba users</p>
+        </header>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="totalCampaigns">0</div>
+                <div class="stat-label">Total Campaigns</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="activeCampaigns">0</div>
+                <div class="stat-label">Active Campaigns</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="totalImpressions">0</div>
+                <div class="stat-label">Total Impressions</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>➕ Create New Campaign</h2>
+            <form id="campaignForm">
+                <div class="form-group">
+                    <label>Campaign Title</label>
+                    <input type="text" id="title" required placeholder="e.g., Tractor Rental Service">
+                </div>
+
+                <div class="form-group">
+                    <label>Ad Message</label>
+                    <textarea id="message" required placeholder="Your promotional message in Hindi/English..."></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label>Keywords (comma-separated)</label>
+                    <input type="text" id="keywords" required placeholder="e.g., tractor, किराये, rent, खेती">
+                    <small style="color: #666;">Trigger ad when user message contains these words</small>
+                </div>
+
+                <div class="form-group">
+                    <label>Call-to-Action Button</label>
+                    <input type="text" id="cta" required placeholder="e.g., Contact Now, Learn More">
+                </div>
+
+                <div class="form-group">
+                    <label>CTA Link (optional)</label>
+                    <input type="url" id="cta_link" placeholder="https://example.com">
+                </div>
+
+                <div class="form-group">
+                    <label>Icon (emoji)</label>
+                    <input type="text" id="icon" value="📢" placeholder="📢">
+                </div>
+
+                <div class="form-group">
+                    <label>Location Filter (optional)</label>
+                    <input type="text" id="location_filter" placeholder="e.g., Indore, Bhopal">
+                    <small style="color: #666;">Leave empty for all locations</small>
+                </div>
+
+                <button type="submit" class="btn">Create Campaign</button>
+            </form>
+        </div>
+
+        <div class="card">
+            <h2>📋 Active Campaigns</h2>
+            <div class="campaign-list" id="campaignList">
+                <p style="color: #666;">Loading campaigns...</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000/v1/admin/ads';
+
+        async function loadCampaigns() {
+            try {
+                const response = await fetch(`${API_BASE}/campaigns`);
+                const data = await response.json();
+
+                if (data.success) {
+                    const campaigns = data.campaigns;
+                    document.getElementById('totalCampaigns').textContent = campaigns.length;
+                    document.getElementById('activeCampaigns').textContent = 
+                        campaigns.filter(c => c.active).length;
+
+                    const listEl = document.getElementById('campaignList');
+                    if (campaigns.length === 0) {
+                        listEl.innerHTML = '<p style="color: #666;">No campaigns yet. Create one above!</p>';
+                    } else {
+                        listEl.innerHTML = campaigns.map(c => `
+                            <div class="campaign-item">
+                                <div class="campaign-header">
+                                    <div class="campaign-title">${c.icon} ${c.title}</div>
+                                    <div class="campaign-status ${!c.active ? 'inactive' : ''}">
+                                        ${c.active ? 'Active' : 'Inactive'}
+                                    </div>
+                                </div>
+                                <div class="campaign-keywords">
+                                    🔑 Keywords: ${c.keywords}
+                                </div>
+                                <div class="campaign-message">${c.message}</div>
+                            </div>
+                        `).join('');
+                    }
+                }
+            } catch (e) {
+                console.error('Load error:', e);
+            }
+        }
+
+        async function loadAnalytics() {
+            try {
+                const response = await fetch(`${API_BASE}/analytics`);
+                const data = await response.json();
+
+                if (data.success) {
+                    const total = data.analytics.reduce((sum, a) => sum + a.impressions, 0);
+                    document.getElementById('totalImpressions').textContent = total;
+                }
+            } catch (e) {
+                console.error('Analytics error:', e);
+            }
+        }
+
+        document.getElementById('campaignForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const formData = new FormData();
+            formData.append('title', document.getElementById('title').value);
+            formData.append('message', document.getElementById('message').value);
+            formData.append('keywords', document.getElementById('keywords').value);
+            formData.append('cta', document.getElementById('cta').value);
+            formData.append('cta_link', document.getElementById('cta_link').value || '');
+            formData.append('icon', document.getElementById('icon').value || '📢');
+            formData.append('location_filter', document.getElementById('location_filter').value || '');
+
+            try {
+                const response = await fetch(`${API_BASE}/campaigns`, {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    alert('✅ Campaign created!');
+                    document.getElementById('campaignForm').reset();
+                    loadCampaigns();
+                } else {
+                    alert('❌ Error: ' + data.message);
+                }
+            } catch (e) {
+                alert('❌ Network error: ' + e);
+            }
+        });
+
+        // Load data on page load
+        loadCampaigns();
+        loadAnalytics();
+
+        // Refresh every 30 seconds
+        setInterval(() => {
+            loadCampaigns();
+            loadAnalytics();
+        }, 30000);
+    </script>
+</body>
+</html>

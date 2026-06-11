@@ -1,0 +1,314 @@
+# ==============================================================================
+# Krishi Baba - The Ultimate AI Farming Assistant - Version 1.0 (Production)
+# This script is the complete, final version, ready for VPS deployment.
+# It integrates the persona, all features, and bug fixes we've built together.
+# ==============================================================================
+
+import os
+import json
+import logging
+import requests
+import subprocess
+from flask import Flask, request, jsonify
+import google.generativeai as genai
+from bs4 import BeautifulSoup
+from datetime import datetime
+
+# --- Import from our other project files ---
+# This assumes all .py files are in the same directory on the VPS.
+from database_handler import get_user_state, save_user_state, get_all_states
+from messaging_handler import send_whatsapp_message
+from survey_config import SURVEY_QUESTIONS
+
+# --- SETUP: Ensure you create this directory in your project folder on the VPS ---
+os.makedirs('collected_media/images', exist_ok=True)
+os.makedirs('collected_media/audio', exist_ok=True)
+
+# --- Setup Logging ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# --- CONFIGURATION ---
+# These keys must be set in your .env file on the VPS
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
+WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
+PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
+VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+SURVEY_TRIGGER_KEY = os.getenv("SURVEY_TRIGGER_KEY")
+
+# --- Validate Essential Configuration ---
+essential_vars = ["GEMINI_API_KEY", "OPENWEATHER_API_KEY", "WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "VERIFY_TOKEN", "SURVEY_TRIGGER_KEY"]
+missing_vars = [var for var in essential_vars if not os.getenv(var)]
+if missing_vars:
+    logging.error(f"Missing essential environment variables: {missing_vars}")
+    raise ValueError(f"Required essential environment variables are missing: {missing_vars}")
+if not GOOGLE_MAPS_API_KEY:
+    logging.warning("GOOGLE_MAPS_API_KEY not found. Pincode-based features will be disabled.")
+
+# --- Setup APIs & Load Databases ---
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel(model_name="models/gemini-1.5-pro-latest")
+STATE_MAP = {"madhya pradesh": "madhya-pradesh", "uttar pradesh": "uttar-pradesh", "rajasthan": "rajasthan"}
+
+def load_crop_database():
+    try:
+        with open('agriplus_crops.json', 'r', encoding='utf-8') as f: return json.load(f)
+    except FileNotFoundError:
+        logging.error("CRITICAL: agriplus_crops.json not found! Please run generate_crop_database.py first.")
+        return {}
+CROP_DATABASE = load_crop_database()
+
+# --- Core Helper Functions ---
+def parse_whatsapp_payload(payload):
+    try:
+        message = payload["entry"][0]["changes"][0]["value"]["messages"][0]; user_id = message["from"]; msg_type = message["type"]
+        if msg_type == "text": return user_id, message["text"]["body"], msg_type, None
+        elif msg_type in ["image", "audio"]: return user_id, f"{msg_type}_received", msg_type, message[msg_type]["id"]
+        elif msg_type == "location": return user_id, "location_received", msg_type, {"lat": message["location"].get("latitude"), "lon": message["location"].get("longitude")}
+    except (KeyError, IndexError): pass
+    return None, None, None, None
+
+def handle_media_download(media_id, file_type, user_id):
+    media_url_endpoint = f"https://graph.facebook.com/v19.0/{media_id}/"; headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    try:
+        response = requests.get(media_url_endpoint, headers=headers, timeout=10); response.raise_for_status(); media_data = response.json(); download_url = media_data.get("url")
+        if not download_url: logging.error("Could not get temporary download URL."); return
+        media_response = requests.get(download_url, headers=headers, timeout=15); media_response.raise_for_status()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S"); extension = "jpg" if file_type == "image" else "ogg"; folder = "images" if file_type == "image" else "audio"
+        file_path = f"collected_media/{folder}/{user_id}_{timestamp}.{extension}"
+        with open(file_path, 'wb') as f: f.write(media_response.content)
+        logging.info(f"Saved {file_type} to {file_path}")
+        thank_you_message = "धन्यवाद भैया! 🙏 आपने जो भेजा है, उसे मैंने अपनी पोथी में सहेज लिया है। मैं अभी सीख रहा हूँ, और आपकी भेजी जानकारी से मुझे भविष्य में और होशियार बनने में मदद मिलेगी।"
+        send_whatsapp_message(user_id, thank_you_message)
+    except Exception as e: logging.error(f"Failed to download media {media_id}: {e}")
+
+def get_coords_from_pincode(pincode, country_code="IN"):
+    if not GOOGLE_MAPS_API_KEY: return None, None
+    try:
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?components=postal_code:{pincode}|country:{country_code}&key={GOOGLE_MAPS_API_KEY}"; res = requests.get(url, timeout=5); res.raise_for_status(); data = res.json()
+        if data['status'] == 'OK': return data['results'][0]['geometry']['location'].get('lat'), data['results'][0]['geometry']['location'].get('lng')
+    except Exception as e: logging.error(f"Failed to get coords for pincode {pincode} from Google: {e}"); return None, None
+
+def get_weather(lat, lon):
+    if not OPENWEATHER_API_KEY: return "⚠️ मौसम सेवा के लिए API की अनुपलब्ध है।", None
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={OPENWEATHER_API_KEY}&units=metric&lang=hi"; res = requests.get(url, timeout=10); res.raise_for_status(); data = res.json(); forecasts = {}
+        for entry in data['list']:
+            date = entry['dt_txt'].split(' ')[0]
+            if date not in forecasts and len(forecasts) < 3: forecasts[date] = {'temp': entry['main']['temp'], 'desc': entry['weather'][0]['description']}
+        forecast_msg = "📍 *3 दिन का मौसम पूर्वानुमान:*"
+        for date, val in forecasts.items(): dt_obj = datetime.strptime(date, '%Y-%m-%d'); forecast_msg += f"\n🗓 {dt_obj.strftime('%A')}, {date}: {val['desc']} |   {val['temp']}°C"
+        return forecast_msg.strip(), forecasts
+    except Exception as e: logging.error(f"Weather fetch failed: {e}"); return "❌ मौसम की जानकारी प्राप्त करने में असमर्थ।", None
+
+def get_location_name(lat, lon):
+    if not GOOGLE_MAPS_API_KEY: return "आपके स्थान पर"
+    try:
+        url = f"https://maps.googleapis.com/maps/api/geocode/json?latlng={lat},{lon}&key={GOOGLE_MAPS_API_KEY}"; res = requests.get(url, timeout=5); res.raise_for_status(); data = res.json()
+        if data['status'] == 'OK' and data['results']: return data['results'][0]['formatted_address']
+    except Exception as e: logging.warning(f"Failed to reverse geocode with Google: {e}"); return "आपके स्थान पर"
+
+def get_mandi_prices_advanced(crop_name, state_name="madhya pradesh", mandi_name=None, max_results=5):
+    crop_slug = CROP_DATABASE.get(crop_name);
+    if not crop_slug: return f"❌ माफ करना भैया, मुझे '{crop_name}' फसल की जानकारी मेरे बही-खाते में नहीं मिली।"
+    state_slug = STATE_MAP.get(state_name.lower())
+    if not state_slug: return f"❌ '{state_name}' राज्य के लिए मंडी भाव उपलब्ध नहीं हैं।"
+    base_url = f"https://agriplus.in/prices/{crop_slug}/{state_slug}"; logging.info(f"Starting scrape for base URL: {base_url}"); prices = []
+    for page_num in range(1, 8):
+        url = f"{base_url}/{page_num}"; logging.info(f"Scraping price page: {url}")
+        try:
+            res = requests.get(url, timeout=15, headers={'User-Agent': 'Mozilla/5.0'}); res.raise_for_status(); soup = BeautifulSoup(res.text, "html.parser")
+            price_table = soup.find("table", class_="price-table")
+            if not price_table:
+                if page_num == 1: logging.warning("Price table not found on first page."); break
+            rows = price_table.find("tbody").find_all("tr")
+            if not rows: break
+            for row in rows:
+                cols = row.find_all("td");
+                if len(cols) < 9: continue
+                market, variety, min_p, max_p, modal_p, date = cols[2].text.strip(), cols[4].text.strip(), cols[5].text.strip(), cols[6].text.strip(), cols[7].text.strip(), cols[8].text.strip()
+                if modal_p == 'N/A': continue
+                price_string = f"📍 *{market}*\n   🌱 Variety: {variety}\n   🗓️ Date: {date}\n   💰 *Price: ₹{modal_p}/क्विंटल* (Min: ₹{min_p} | Max: ₹{max_p})"
+                if mandi_name and mandi_name.lower() in market.lower(): return f"✅ *{crop_name}* का भाव *{market}* में मिल गया:\n\n{price_string}"
+                if len(prices) < max_results: prices.append(price_string)
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404: logging.warning(f"Page {page_num} not found."); break
+            else: logging.error(f"HTTP error on {url}: {e}"); break
+        except Exception as e: logging.error(f"Failed during scrape of {url}: {e}"); break
+    if mandi_name:
+        if prices: return f"🤔 माफ करना भैया, '{mandi_name}' मंडी का सटीक भाव तो नहीं मिला, पर यह कुछ दूसरी मंडियों के भाव हैं:\n\n" + "\n\n".join(prices)
+        else: return f"❌ माफ करना, '{state_name}' में '{crop_name}' के लिए '{mandi_name}' मंडी का कोई भाव नहीं मिला।"
+    if prices: return f"📊 *{crop_name}* के कुछ ताज़ा मंडी भाव:\n\n" + "\n\n".join(prices)
+    return f"❌ '{state_name}' में '{crop_name}' के लिए कोई मंडी भाव नहीं मिला।"
+
+def parse_user_intent(user_msg, conversation_history):
+    history_str = json.dumps(conversation_history)
+    prompt = f"""You are an NLU engine for Krishi Baba. Analyze the user's latest message in context of the history to determine their intent.
+Categorize into: "weather_query", "mandi_query", "kvk_query", "general_advice_query", or "greeting_or_smalltalk".
+History: {history_str}
+User Message: "{user_msg}"
+Respond with ONLY a JSON object with a single key "intent"."""
+    try:
+        result = model.generate_content(prompt); clean_text = result.text.strip().replace("```json", "").replace("```", ""); data = json.loads(clean_text); return data
+    except Exception as e: logging.error(f"Gemini NLU parsing error: {e}"); return {"intent": "general_advice_query"}
+
+def extract_mandi_details(user_msg, conversation_history):
+    crop_list_for_prompt = ", ".join(list(CROP_DATABASE.keys())[:50])
+    history_str = json.dumps(conversation_history[-4:])
+    prompt = f"""You are a highly accurate data extraction bot. Your ONLY job is to identify a single crop and a single market (mandi) name from the user's latest message, using the conversation history for context if needed.
+Official Crop List: {crop_list_for_prompt}
+Conversation History: {history_str}
+User's Latest Message: "{user_msg}"
+Instructions: Analyze the "User's Latest Message". If the crop is mentioned, extract it. If not, look at the "Conversation History". Match the found crop to the "Official Crop List". Extract the market/mandi name ONLY if it's in the latest message. If no crop is found, return null.
+Respond with ONLY a JSON object.
+Example: "bhav kya hai raisen mandi ka?" -> {{"crop_name": "Soyabean", "mandi": "raisen"}}"""
+    try:
+        result = model.generate_content(prompt); clean_text = result.text.strip().replace("```json", "").replace("```", ""); data = json.loads(clean_text); return data
+    except Exception as e: logging.error(f"Gemini mandi detail extraction error: {e}"); return {}
+
+# --- Main App Logic & Handlers ---
+app = Flask(__name__)
+@app.route("/")
+def health_check(): return "✅ AgriBot is alive and ready!", 200
+
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook_handler():
+    if request.method == "GET":
+        if request.args.get("hub.verify_token") == VERIFY_TOKEN: return request.args.get("hub.challenge"), 200
+        return "Invalid verification token", 403
+    payload = request.get_json()
+    user_id, msg, msg_type, media_data = parse_whatsapp_payload(payload)
+    if not user_id or not msg: return jsonify({"status": "ok"}), 200
+    state = get_user_state(user_id)
+    logging.info(f"Processing for {user_id}: '{msg}' | State: {state.get('step')}")
+    if msg.lower() == "reset":
+        state = {"step": "name", "history": []}; send_whatsapp_message(user_id, "🙏 नमस्ते! चलिए फिर से शुरू करते हैं। कृपया अपना नाम बताएं:")
+    elif msg.lower() in ["help", "सहायता", "menu"]:
+        send_whatsapp_message(user_id, """*नमस्ते! मैं कृषि बाबा हूँ। आप मुझसे यह सब पूछ सकते हैं:*\n\n🌾 *खेती की सलाह*\n🌦️ *मौसम की जानकारी*\n💰 *मंडी भाव*\n📍 *मिट्टी जांच केंद्र*\n\n📝 *फीडबैक* देने के लिए 'feedback' या 'सुझाव' लिखें।""")
+    elif msg.lower() in ["feedback", "सुझाव", "survey"] or state.get('step', '').startswith('survey_'):
+        handle_survey(state, msg, user_id)
+    elif msg_type in ["image", "audio"]:
+        handle_media_download(media_data, msg_type, user_id)
+    elif state.get("step") not in ["final", "done"]:
+        handle_onboarding(state, msg, media_data, user_id)
+    else:
+        state["history"].append({"role": "user", "parts": [msg]})
+        handle_final_state(state, msg, user_id)
+    save_user_state(user_id, state)
+    return jsonify({"status": "ok"}), 200
+
+def handle_onboarding(state, msg, media_data, user_id):
+    step = state.get("step"); bot_response_text = ""
+    if step == "name":
+        prompt = f"""The bot asked for the user's name. The user replied: "{msg}". Extract the user's proper name. If it's a correction like 'no, my name is...', extract the correct name. Respond with JSON: {{"name": "the_extracted_name"}}"""
+        try:
+            result = model.generate_content(prompt); clean_text = result.text.strip().replace("```json", "").replace("```", ""); data = json.loads(clean_text)
+            name = data.get("name")
+            if name: state["name"] = name; state["step"] = "crop"; bot_response_text = f"ठीक है, {name} जी! अब कृपया बताएं आपकी मुख्य फसल कौन सी है?"
+            else: bot_response_text = "माफ करना, मैं आपका नाम समझ नहीं पाया। कृपया सिर्फ अपना नाम बताएं।"
+        except Exception: state["name"] = msg; state["step"] = "crop"; bot_response_text = f"धन्यवाद {msg} जी! अब कृपया बताएं आपकी मुख्य फसल कौन सी है?"
+    elif step == "crop":
+        state["crop"] = msg.lower(); state["step"] = "location"; bot_response_text = "📍 अपनी लोकेशन भेजने के लिए WhatsApp में अटैचमेंट 📎 -> Location -> Send Your Current Location पर टैप करें।\n\nया फिर 6 अंकों का *पिनकोड* लिखें।"
+    elif step == "location":
+        lat, lon = (media_data.get("lat"), media_data.get("lon")) if msg == "location_received" else (None, None)
+        if lat and lon: state["lat"], state["lon"], state["step"] = float(lat), float(lon), "final"; loc_name = get_location_name(state["lat"], state["lon"]); bot_response_text = f"✅ लोकेशन मिल गई है: {loc_name}\n\nअब आप मौसम, मंडी भाव, या खेती से जुड़ा कोई भी सवाल पूछ सकते हैं।"
+        elif msg.replace(" ", "").isdigit() and len(msg) == 6: state["pincode"], state["step"] = msg, "final"; bot_response_text = f"✅ पिनकोड ({msg}) स्वीकार किया गया।\n\nअब आप मौसम, मंडी भाव, या खेती से जुड़ा कोई भी सवाल पूछ सकते हैं।"
+        else: bot_response_text = "❗ कृपया खेत की *सही लोकेशन* भेजें या *6 अंकों का पिनकोड* लिखें।"
+    send_whatsapp_message(user_id, bot_response_text)
+    state["history"].append({"role": "user", "parts": [msg]}); state["history"].append({"role": "model", "parts": [bot_response_text]})
+
+def handle_final_state(state, msg, user_id):
+    parsed_intent = parse_user_intent(msg, state.get("history", [])); intent = parsed_intent.get("intent")
+    bot_response_text = ""
+    if intent == "weather_query": handle_weather_query(state, user_id)
+    elif intent == "mandi_query": bot_response_text = handle_mandi_query(state, msg, user_id)
+    elif intent == "kvk_query": bot_response_text = handle_kvk_query(state, user_id)
+    elif intent == "greeting_or_smalltalk": bot_response_text = "राम राम भैया! और बताओ, क्या सेवा करूँ आपकी?"
+    else: bot_response_text = handle_general_advice(state, msg, user_id)
+    if bot_response_text:
+        send_whatsapp_message(user_id, bot_response_text)
+        state["history"].append({"role": "model", "parts": [bot_response_text]})
+
+def handle_survey(state, msg, user_id):
+    current_step = state.get('step', ''); bot_response_text = ""
+    if not current_step.startswith('survey_'):
+        state['step'] = 'survey_q1'
+        intro = f"नमस्ते {state.get('name', 'किसान भाई')}! कृषि बाबा के काम को और बेहतर बनाने के लिए, क्या आप कुछ छोटे सवालों के जवाब देंगे?"
+        send_whatsapp_message(user_id, intro); bot_response_text = SURVEY_QUESTIONS["q1"]
+    else:
+        question_key = current_step.replace('survey_', ''); save_survey_response(user_id, question_key, msg)
+        next_q_num = int(question_key[1:]) + 1; next_q_key = f'q{next_q_num}'
+        if next_q_key in SURVEY_QUESTIONS:
+            state['step'] = next_q_key; bot_response_text = SURVEY_QUESTIONS[next_q_key]
+        else:
+            bot_response_text = "बहुत-बहुत धन्यवाद भैया! आपकी सलाह मेरे लिए अनमोल है। 🙏"; state['step'] = 'final'
+    send_whatsapp_message(user_id, bot_response_text)
+    state["history"].append({"role": "user", "parts": [msg]}); state["history"].append({"role": "model", "parts": [bot_response_text]})
+
+def handle_weather_query(state, user_id):
+    lat, lon = state.get("lat"), state.get("lon")
+    if not lat and "pincode" in state:
+        send_whatsapp_message(user_id, f"आपके पिनकोड {state['pincode']} के लिए मौसम खोजा जा रहा है..."); lat, lon = get_coords_from_pincode(state['pincode'])
+    if lat and lon:
+        data_forecast, forecast_dict = get_weather(lat, lon); send_whatsapp_message(user_id, data_forecast)
+        if forecast_dict:
+            commentary_prompt = f"""तुम कृषि बाबा हो, एक 500 साल के ज्ञानी और मज़ाकिया किसान। यह 3 दिन का मौसम डेटा है: {forecast_dict}। इस डेटा के आधार पर, किसान को 1-2 लाइन में देसी अंदाज़ में एक मज़ेदार और उपयोगी सलाह दो।"""
+            try: result = model.generate_content(commentary_prompt); send_whatsapp_message(user_id, result.text.strip())
+            except Exception as e: logging.error(f"Gemini weather commentary error: {e}")
+    else: send_whatsapp_message(user_id, "🌦️ मौसम की जानकारी के लिए, कृपया पहले अपनी लोकेशन या पिनकोड भेजें।")
+
+def handle_mandi_query(state, msg, user_id):
+    params = extract_mandi_details(msg, state.get("history", [])); crop_name = params.get("crop_name") or state.get("crop")
+    if not crop_name: return "🤔 माफ करना भैया, मैं समझ नहीं पाया आप कौन सी फसल की बात कर रहे हो।"
+    mandi = params.get("mandi"); user_state_name = "madhya pradesh"
+    send_whatsapp_message(user_id, f"ठीक है, मैं '{crop_name}' के लिए मंडी भाव खोज रहा हूँ...")
+    return get_mandi_prices_advanced(crop_name, user_state_name, mandi)
+
+def handle_kvk_query(state, user_id):
+    location_info = "अज्ञात"
+    if 'lat' in state and 'lon' in state: location_info = get_location_name(state['lat'], state['lon'])
+    elif 'pincode' in state: location_info = f"पिनकोड {state['pincode']}"
+    prompt = f"""एक किसान, जो {location_info} में है, निकटतम कृषि विज्ञान केंद्र (KVK) का पता पूछ रहा है। वेब पर खोज कर सबसे विश्वसनीय KVK का पता और फ़ोन नंबर प्रदान करें।"""
+    try:
+        send_whatsapp_message(user_id, f"ठीक है, मैं {location_info} के पास कृषि विज्ञान केंद्र खोज रहा हूँ...")
+        result = model.generate_content(prompt); return result.text.strip()
+    except Exception as e:
+        logging.error(f"Gemini KVK search error: {e}"); return "❌ माफ करना भैया, मैं अभी कृषि केंद्र की जानकारी नहीं ढूंढ पा रहा हूँ।"
+
+def handle_general_advice(state, msg, user_id):
+    location_info = "अज्ञात"
+    if 'lat' in state and 'lon' in state: location_info = get_location_name(state['lat'], state['lon'])
+    elif 'pincode' in state: location_info = f"पिनकोड {state['pincode']}"
+    history_for_prompt = "\n".join([f"- {item['role']}: {item['parts'][0]}" for item in state.get('history', [])])
+    prompt = f"""**PERSONA:** तुम कृषि बाबा हो, एक 500 साल के अनुभवी और मज़ाकिया किसान...
+**MAIN GOAL:** तुम्हारा मुख्य लक्ष्य किसान को ठोस...
+**RULES:** ...
+**FARMER'S CONTEXT:** ...- स्थान: {location_info}
+**CONVERSATION HISTORY:**{history_for_prompt}
+**FARMER'S LATEST QUESTION:** "{msg}"
+**YOUR RESPONSE (as Krishi Baba):**"""
+    try:
+        result = model.generate_content(prompt); return result.text.strip()
+    except Exception as e:
+        logging.error(f"General Gemini Q&A error: {e}"); return "❌ तकनीकी दिक्कत है। कृपया थोड़ी देर बाद फिर प्रयास करें।"
+
+@app.route("/initiate-survey", methods=['POST'])
+def manual_survey_trigger():
+    data = request.get_json()
+    if not SURVEY_TRIGGER_KEY or data.get("secret_key") != SURVEY_TRIGGER_KEY:
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+    try:
+        logging.info("MANUAL TRIGGER: Initiating survey send process.")
+        # On a VPS, we use absolute paths for reliability
+        python_executable = "/home/cillianmurphy107/krishi_baba/venv/bin/python" # Make sure this path is correct
+        script_path = "/home/cillianmurphy107/krishi_baba/survey_sender.py" # Make sure this path is correct
+        subprocess.Popen([python_executable, script_path])
+        return jsonify({"status": "success", "message": "Survey process initiated."}), 200
+    except Exception as e:
+        logging.error(f"Failed to initiate manual survey: {e}")
+        return jsonify({"status": "error", "message": "Failed to start survey process."}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8080)
+ 
