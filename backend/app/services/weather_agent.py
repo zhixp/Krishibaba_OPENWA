@@ -24,7 +24,7 @@ class WeatherAgent:
         user_profile: str = ""
     ) -> str:
         """
-        Analyze 3-day forecast and give farming advice
+        Analyze 3-day forecast without giving irrigation advice.
         
         Args:
             forecast_data: Weather data from OpenWeatherMap
@@ -35,7 +35,7 @@ class WeatherAgent:
             3-4 line Hindi weather advice for farming
         """
         
-        prompt = f"""तुम मौसम विशेषज्ञ हो। किसानों को मौसम के आधार पर सलाह देनी है।
+        prompt = f"""तुम Krishi Baba के मौसम सहायक हो। किसान को सिर्फ मौसम forecast समझाना है।
 
 स्थान: {location}
 
@@ -45,11 +45,14 @@ class WeatherAgent:
 3 दिन का मौसम डेटा:
 {json.dumps(forecast_data, indent=2, ensure_ascii=False)}
 
-3-4 लाइन में सलाह दो:
-- नमी (Humidity) का असर
-- हवा (Wind) की स्थिति
+3-4 लाइन में सिर्फ forecast समझाओ:
 - बारिश की संभावना
-- इसके हिसाब से खेती के काम
+- तापमान
+- नमी (Humidity)
+- हवा (Wind)
+
+सिंचाई, दवाई, छिड़काव, कटाई या खेत का काम करने/न करने की सलाह मत दो।
+अगर किसान ने irrigation अलग से पूछा हो तभी field condition पूछी जाएगी; यहाँ नहीं।
 
 सीधी, साफ हिंदी में जवाब:"""
 
@@ -61,7 +64,7 @@ class WeatherAgent:
             
         except Exception as e:
             logger.error(f"Weather Agent error: {e}")
-            return "मौसम साफ है। सामान्य खेती के काम कर सकते हो।"
+            return "मौसम का छोटा सार नहीं बन पाया। ऊपर दिए 3 दिन के forecast को देखकर फैसला करें।"
 
 
 # Singleton

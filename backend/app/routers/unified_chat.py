@@ -11,6 +11,7 @@ from app.services.sarpanch_agent import sarpanch_agent
 from app.services.weather_service import weather_service
 from app.services.chat_memory import chat_memory
 from app.services.user_profile import user_profile
+from app.services.location_service import weather_location_note
 import aiosqlite
 import logging
 import asyncio
@@ -37,7 +38,7 @@ async def unified_chat(
     Returns natural, context-aware response
     """
     try:
-        logger.info(f"💬 Unified Chat: {message[:100]}...")
+        logger.info("Unified chat request received; message_length=%s", len(message))
         
         # Get user profile
         profile = await user_profile.get_profile(db, uid)
@@ -48,7 +49,7 @@ async def unified_chat(
         
         # STEP 1: Classify Intent
         intent = intent_classifier.classify(message, profile.get('location'))
-        logger.info(f"🎯 Intent: {intent}")
+        logger.info("Unified chat intent classified")
         
         # STEP 2: Fetch Data (Parallel Execution)
         weather_data = None
@@ -69,6 +70,8 @@ async def unified_chat(
                     
                     if not current or not forecast:
                         return None
+
+                    location_source = profile.get("location_source", "unknown")
                     
                     # Get Weather Agent analysis
                     analysis = await weather_agent.analyze_forecast(
@@ -80,7 +83,10 @@ async def unified_chat(
                     return {
                         "current": current,
                         "forecast": forecast,
-                        "analysis": analysis
+                        "analysis": analysis,
+                        "location_source": location_source,
+                        "location_confidence": profile.get("location_confidence", "low"),
+                        "location_note": weather_location_note(location_source),
                     }
                 except Exception as e:
                     logger.error(f"Weather fetch error: {e}")
@@ -160,7 +166,7 @@ async def unified_chat(
         data_context = ""
         
         if weather_data:
-            data_context += f"\n\n=== मौसम की जानकारी ===\n{weather_data['analysis']}\n"
+            data_context += f"\n\n=== मौसम की जानकारी ===\n{weather_data['location_note']}\n{weather_data['analysis']}\n"
         
         if mandi_data:
             highest = max(mandi_data['prices'], key=lambda x: x['price_modal'])

@@ -10,14 +10,65 @@ from app.services.sarpanch_agent import sarpanch_agent
 from app.services.weather_service import weather_service
 from app.services.chat_memory import chat_memory
 from app.services.user_profile import user_profile
+from app.services.location_service import (
+    LOCATION_ONBOARDING_MESSAGE,
+    build_weather_location_from_user,
+    resolve_onboarding_location,
+    weather_location_note,
+)
+from app.core.config import settings
+from app.core.security import redacted_identifier
+from app.core.uploads import ALLOWED_IMAGE_MIME_TYPES, ALLOWED_IMAGE_SUFFIXES, save_bounded_upload
 import aiosqlite
+import json
 import logging
-import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["Sarpanch AI"])
+
+
+async def _save_resolved_location(
+    db: aiosqlite.Connection,
+    uid: str,
+    resolved: dict,
+) -> None:
+    await db.execute("""
+        INSERT INTO users
+        (uid, lat, long, gps_lat, gps_lon, default_pincode, village,
+         default_district, state, location_source, location_confidence,
+         location_data, step)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+        ON CONFLICT(uid) DO UPDATE SET
+            lat = excluded.lat,
+            long = excluded.long,
+            gps_lat = excluded.gps_lat,
+            gps_lon = excluded.gps_lon,
+            default_pincode = COALESCE(excluded.default_pincode, users.default_pincode),
+            village = COALESCE(excluded.village, users.village),
+            default_district = COALESCE(excluded.default_district, users.default_district),
+            state = COALESCE(excluded.state, users.state),
+            location_source = excluded.location_source,
+            location_confidence = excluded.location_confidence,
+            location_data = excluded.location_data,
+            updated_at = CURRENT_TIMESTAMP
+    """, (
+        uid,
+        resolved["lat"],
+        resolved["lon"],
+        resolved.get("gps_lat"),
+        resolved.get("gps_lon"),
+        resolved.get("pincode"),
+        resolved.get("village"),
+        resolved.get("district"),
+        resolved.get("state"),
+        resolved["location_source"],
+        resolved["location_confidence"],
+        json.dumps(resolved.get("location_data") or {}, ensure_ascii=False),
+    ))
+    await db.commit()
 
 
 # ============================================================================
@@ -27,38 +78,91 @@ router = APIRouter(prefix="/v1", tags=["Sarpanch AI"])
 @router.post("/weather/report")
 async def get_weather_report(
     uid: str = Form(...),
+    latitude: Optional[float] = Form(None, ge=-90, le=90),
+    longitude: Optional[float] = Form(None, ge=-180, le=180),
     pincode: Optional[str] = Form(None),
+    village: Optional[str] = Form(None),
+    district: Optional[str] = Form(None),
+    state: Optional[str] = Form(None),
     db: aiosqlite.Connection = Depends(get_db)
 ):
     """
-    Weather Agent: 3-day forecast with farming advice
+    Weather Agent: 3-day forecast with explicit location confidence.
     """
     try:
-        # Get user location
         cursor = await db.execute(
-            "SELECT lat, long, default_district FROM users WHERE uid = ?", 
-            (uid,)
+            """SELECT lat, long, gps_lat, gps_lon, default_pincode, default_district,
+                      village, state, location_source, location_confidence
+               FROM users WHERE uid = ?""",
+            (uid,),
         )
-        user = await cursor.fetchone()
-        
-        if not user or (not user[0] and not pincode):
-            return {
-                "success": False,
-                "message": "❌ लोकेशन नहीं मिली। कृपया पहले लोकेशन सेट करें।"
+        row = await cursor.fetchone()
+        user_location_data = dict(row) if row else {}
+        saved_location = build_weather_location_from_user(user_location_data) if row else None
+        has_text_location_input = any([pincode, village, district, state])
+
+        # Fresh GPS from WhatsApp always wins and upgrades approximate saved locations.
+        if latitude is not None or longitude is not None:
+            resolved = await resolve_onboarding_location(
+                latitude=latitude,
+                longitude=longitude,
+                pincode=pincode,
+                village=village,
+                district=district,
+                state=state,
+            )
+            if not resolved.get("success"):
+                return {
+                    "success": False,
+                    "needs_location": True,
+                    "message": resolved.get("message") or LOCATION_ONBOARDING_MESSAGE,
+                }
+
+            await _save_resolved_location(db, uid, resolved)
+            location_context = {
+                "lat": resolved["lat"],
+                "lon": resolved["lon"],
+                "source": resolved["location_source"],
+                "confidence": resolved["location_confidence"],
+                "display_name": resolved.get("location_name") or resolved.get("district") or "आपकी लोकेशन",
             }
-        
-        lat, lon, district = user[0], user[1], user[2]
-        
-        # Override with pincode if provided
-        if pincode:
-            loc_data = await weather_service.geocode_location(pincode)
-            if loc_data:
-                lat, lon = loc_data['lat'], loc_data['lon']
-                district = loc_data.get('district', pincode)
+        elif saved_location and saved_location["source"] == "gps":
+            location_context = saved_location
+        else:
+            resolved = await resolve_onboarding_location(
+                pincode=pincode or (None if has_text_location_input else user_location_data.get("default_pincode")),
+                village=village or (None if has_text_location_input else user_location_data.get("village")),
+                district=district or (None if has_text_location_input else user_location_data.get("default_district")),
+                state=state or (None if has_text_location_input else user_location_data.get("state")),
+            )
+            if not resolved.get("success"):
+                if saved_location:
+                    location_context = saved_location
+                else:
+                    return {
+                        "success": False,
+                        "needs_location": True,
+                        "message": resolved.get("message") or LOCATION_ONBOARDING_MESSAGE,
+                    }
+            else:
+                location_context = {
+                    "lat": resolved["lat"],
+                    "lon": resolved["lon"],
+                    "source": resolved["location_source"],
+                    "confidence": resolved["location_confidence"],
+                    "display_name": resolved.get("location_name") or resolved.get("district") or "आपका क्षेत्र",
+                }
+
+                await _save_resolved_location(db, uid, resolved)
+
+        lat, lon = location_context["lat"], location_context["lon"]
+        display_name = location_context["display_name"]
+        source = location_context["source"]
+        confidence = location_context["confidence"]
         
         # Fetch weather data
         current = await weather_service.get_current_weather(lat, lon)
-        forecast = await weather_service.get_forecast(lat, lon, days=3)
+        forecast = await weather_service.get_forecast(lat, lon, days=5)
         
         if not current or not forecast:
             return {
@@ -71,18 +175,35 @@ async def get_weather_report(
         
         # WEATHER AGENT: Analyze forecast
         weather_advice = await weather_agent.analyze_forecast(
-            forecast_data=forecast,
-            location=district,
+            forecast_data=forecast[:3],
+            location=display_name,
             user_profile=profile_context
         )
+
+        later_rain_note = None
+        for day in forecast[3:]:
+            rain_probability = day.get("rain_probability", 0) or 0
+            rain_mm = day.get("rain_mm", 0) or 0
+            if rain_probability >= 30 or rain_mm > 0:
+                later_rain_note = (
+                    f"{day.get('date')} को बारिश की संभावना दिख रही है। "
+                    "लंबा forecast बदल सकता है, 2-3 दिन बाद फिर चेक कर लेना।"
+                )
+                break
         
         return {
             "success": True,
-            "location": f"📍 {district}",
+            "location": f"📍 {display_name}",
+            "weather_location_note": weather_location_note(source),
+            "location_source": source,
+            "location_confidence": confidence,
+            "approximate_location": source != "gps",
+            "generated_at": datetime.now().isoformat(),
             "current": {
                 "temp": f"{current.get('temp')}°C",
                 "condition": current.get('description'),
                 "humidity": f"{current.get('humidity')}%",
+                "wind_speed": current.get("wind_speed"),
                 "icon": current.get('icon')
             },
             "forecast": [
@@ -92,10 +213,13 @@ async def get_weather_report(
                     "temp_max": day.get('temp_max'),
                     "condition": day.get('description'),
                     "rain_chance": f"{day.get('rain_probability', 0)}%",
+                    "humidity": day.get("humidity"),
+                    "wind_speed": day.get("wind_speed"),
                     "icon": day.get('icon')
                 }
                 for day in forecast[:3]
             ],
+            "later_rain_note": later_rain_note,
             "advice": f"💬  {weather_advice}"
         }
     
@@ -253,19 +377,26 @@ async def upload_disease_image(
     db: aiosqlite.Connection = Depends(get_db)
 ):
     """Disease image upload for future ML"""
+    file_path: Optional[Path] = None
     try:
-        upload_dir = "uploads"
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        filename = f"{uid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{image.filename}"
-        filepath = os.path.join(upload_dir, filename)
-        
-        with open(filepath, "wb") as f:
-            f.write(await image.read())
+        filename, file_path, file_size = await save_bounded_upload(
+            upload=image,
+            destination_dir=Path("uploads/images"),
+            owner_id=uid,
+            allowed_mime_types=ALLOWED_IMAGE_MIME_TYPES,
+            allowed_suffixes=ALLOWED_IMAGE_SUFFIXES,
+            max_size_mb=max(1, settings.MAX_IMAGE_SIZE_MB),
+        )
+
+        logger.info(
+            "Disease image saved for uid_hash=%s bytes=%s",
+            redacted_identifier(uid),
+            file_size,
+        )
         
         await db.execute(
-            "INSERT INTO uploaded_images (uid, filename, crop_type) VALUES (?, ?, ?)",
-            (uid, filename, crop_type or "Unknown")
+            "INSERT INTO uploaded_images (uid, filename, crop_type, file_size) VALUES (?, ?, ?, ?)",
+            (uid, filename, crop_type or "Unknown", file_size)
         )
         await db.commit()
         
@@ -274,6 +405,8 @@ async def upload_disease_image(
             "message": "✅ तस्वीर मिल गई! हम जल्द ही बीमारी पहचान की सुविधा शुरू करेंगे।"
         }
     except Exception as e:
+        if file_path and file_path.exists():
+            file_path.unlink()
         logger.error(f"Image upload error: {e}")
         return {
             "success": False,
@@ -288,30 +421,45 @@ async def upload_disease_image(
 @router.post("/onboarding/location")
 async def save_user_location(
     uid: str = Form(...),
-    latitude: float = Form(...),
-    longitude: float = Form(...),
+    latitude: Optional[float] = Form(None, ge=-90, le=90),
+    longitude: Optional[float] = Form(None, ge=-180, le=180),
+    pincode: Optional[str] = Form(None),
+    village: Optional[str] = Form(None),
+    district: Optional[str] = Form(None),
+    state: Optional[str] = Form(None),
     db: aiosqlite.Connection = Depends(get_db)
 ):
-    """Save user GPS location"""
+    """Save GPS-first location, with pincode or village+district as fallback."""
     try:
-        loc_data = await weather_service.reverse_geocode(latitude, longitude)
-        district = loc_data.get('district', 'Unknown')
+        resolved = await resolve_onboarding_location(
+            latitude=latitude,
+            longitude=longitude,
+            pincode=pincode,
+            village=village,
+            district=district,
+            state=state,
+        )
+
+        if not resolved.get("success"):
+            return {
+                "success": False,
+                "needs_location": resolved.get("needs_location", False),
+                "needs_district": resolved.get("needs_district", False),
+                "message": resolved.get("message") or LOCATION_ONBOARDING_MESSAGE,
+            }
         
-        await db.execute("""
-            INSERT INTO users (uid, lat, long, default_district, step)
-            VALUES (?, ?, ?, ?, 'active')
-            ON CONFLICT(uid) DO UPDATE SET
-                lat = excluded.lat,
-                long = excluded.long,
-                default_district = excluded.default_district,
-                updated_at = CURRENT_TIMESTAMP
-        """, (uid, latitude, longitude, district))
-        await db.commit()
+        await _save_resolved_location(db, uid, resolved)
         
         return {
             "success": True,
-            "message": f"✅ लोकेशन सेव हो गई: {district}",
-            "district": district
+            "message": resolved["message"],
+            "location_source": resolved["location_source"],
+            "location_confidence": resolved["location_confidence"],
+            "approximate_location": resolved["location_source"] != "gps",
+            "pincode": resolved.get("pincode"),
+            "village": resolved.get("village"),
+            "district": resolved.get("district"),
+            "state": resolved.get("state"),
         }
     except Exception as e:
         logger.error(f"Location save error: {e}")

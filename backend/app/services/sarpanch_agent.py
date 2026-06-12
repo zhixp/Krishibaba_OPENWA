@@ -54,7 +54,7 @@ IMPORTANT RULES:
 Give a simple, clear answer in plain Hindi:"""
 
         try:
-            logger.info(f"🌾 Sarpanch AI answering: {message[:50]}...")
+            logger.info("Sarpanch AI answering; message_length=%s", len(message))
             model = genai.GenerativeModel(self.model_name)
             response = model.generate_content(prompt)
             

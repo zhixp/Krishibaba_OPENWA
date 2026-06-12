@@ -2,10 +2,10 @@
 Admin Router
 Protected endpoints for data ingestion and management
 """
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException
 from app.models.schemas import MandiPrice, GovtScheme
 from app.database.db import get_db
-from app.core.config import settings
+from app.core.security import verify_admin_key
 import aiosqlite
 from typing import List
 import logging
@@ -13,13 +13,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def verify_admin_key(x_api_key: str = Header(...)):
-    """Dependency to verify admin API key"""
-    if x_api_key != settings.ADMIN_API_KEY:
-        raise HTTPException(status_code=403, detail="Invalid API key")
-    return x_api_key
 
 
 @router.post("/ingest/mandi", dependencies=[Depends(verify_admin_key)])

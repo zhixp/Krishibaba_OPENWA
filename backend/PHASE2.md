@@ -169,7 +169,7 @@ Modify the `template` fields in `prompts.yaml` to change how AI responds.
 Then reload:
 ```bash
 curl -X POST http://localhost:8000/v1/admin/reload-prompts \
-  -H "X-API-Key: changeme_in_production"
+  -H "X-API-Key: $ADMIN_API_KEY"
 ```
 
 ---

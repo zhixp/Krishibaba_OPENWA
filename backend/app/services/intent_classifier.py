@@ -70,7 +70,7 @@ class IntentClassifier:
                 "needs_advice": True,
                 "confidence": "high"
             }
-            logger.info(f"🎯 Complex query detected: {message[:50]}... → Weather + Mandi + Advice")
+            logger.info("Intent classified as complex; message_length=%s", len(message))
         
         elif has_weather and has_mandi:
             # Both mentioned explicitly
@@ -80,7 +80,7 @@ class IntentClassifier:
                 "needs_advice": True,
                 "confidence": "high"
             }
-            logger.info(f"🎯 Multi-topic query: {message[:50]}... → Weather + Mandi")
+            logger.info("Intent classified as multi_topic; message_length=%s", len(message))
         
         elif has_weather:
             # Weather only
@@ -90,7 +90,7 @@ class IntentClassifier:
                 "needs_advice": True,
                 "confidence": "medium"
             }
-            logger.info(f"🌦️ Weather query: {message[:50]}...")
+            logger.info("Intent classified as weather; message_length=%s", len(message))
         
         elif has_mandi:
             # Mandi only
@@ -100,7 +100,7 @@ class IntentClassifier:
                 "needs_advice": True,
                 "confidence": "medium"
             }
-            logger.info(f"💰 Mandi query: {message[:50]}...")
+            logger.info("Intent classified as mandi; message_length=%s", len(message))
         
         else:
             # General farming advice
@@ -110,7 +110,7 @@ class IntentClassifier:
                 "needs_advice": True,
                 "confidence": "low"
             }
-            logger.info(f"🌾 General advice: {message[:50]}...")
+            logger.info("Intent classified as general_advice; message_length=%s", len(message))
         
         return result
 

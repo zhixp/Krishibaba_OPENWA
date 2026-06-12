@@ -2,7 +2,7 @@
 Pydantic Models for API Request/Response
 """
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
 from datetime import datetime
 
 
@@ -11,8 +11,14 @@ class UserCreate(BaseModel):
     uid: str = Field(..., description="Google User ID")
     name: str = Field(..., min_length=1, max_length=100)
     phone: Optional[str] = None
-    default_pincode: str = Field(..., pattern=r'^\d{6}$', description="6-digit pincode")
+    default_pincode: Optional[str] = Field(None, pattern=r'^\d{6}$', description="6-digit pincode")
     default_district: Optional[str] = None
+    gps_lat: Optional[float] = Field(None, ge=-90, le=90)
+    gps_lon: Optional[float] = Field(None, ge=-180, le=180)
+    village: Optional[str] = None
+    state: Optional[str] = None
+    location_source: Optional[Literal["gps", "pincode", "village_text"]] = None
+    location_confidence: Optional[Literal["high", "medium", "low"]] = None
 
 
 class UserProfile(BaseModel):
@@ -20,8 +26,14 @@ class UserProfile(BaseModel):
     uid: str
     name: str
     phone: Optional[str]
-    default_pincode: str
+    default_pincode: Optional[str]
     default_district: Optional[str]
+    gps_lat: Optional[float] = None
+    gps_lon: Optional[float] = None
+    village: Optional[str] = None
+    state: Optional[str] = None
+    location_source: Optional[str] = None
+    location_confidence: Optional[str] = None
     created_at: Optional[datetime]
 
 

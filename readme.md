@@ -282,7 +282,15 @@ First-time flow
 
 Then:
 
-कौन से गांव/पिनकोड से हो?
+📍 सही मौसम बताने के लिए आपकी लोकेशन चाहिए।
+
+नीचे 📎 / + पर दबाओ → Location चुनो → Current Location भेज दो।
+
+अगर लोकेशन नहीं भेज पा रहे हो, तो 6 अंकों का पिनकोड भेज दो।
+
+Fallback:
+
+कौन से गांव/जिले से हो?
 
 Then:
 
@@ -301,6 +309,9 @@ phone_hash
 village/pincode
 district
 state
+gps_lat/gps_lon when WhatsApp location is shared
+location_source = gps | pincode | village_text
+location_confidence = high | medium | low
 main_crop
 language/dialect guess
 consent status
@@ -319,6 +330,42 @@ Important:
 If farmer already gave pincode/location, Krishi Baba must never ask it again unless data is unclear.
 
 Old issue: bot asked for location even when farmer had already provided it. That must be killed.
+
+Location priority:
+
+1. WhatsApp shared location / GPS
+Best for weather.
+
+2. Pincode
+Good fallback, but weather must be marked approximate.
+
+3. Village + district
+Backup fallback. If village name is ambiguous, ask district.
+
+4. State only
+Not enough for weather. Ask again.
+
+Backend storage:
+
+Store both exact and fallback identity fields:
+
+gps_lat
+gps_lon
+location_source
+location_confidence
+pincode
+village
+district
+state
+
+If farmer sends GPS:
+use GPS for weather, reverse/local lookup only for display name, confidence high.
+
+If farmer sends pincode:
+use local/known coordinates as approximate weather fallback, confidence medium.
+
+If farmer sends village + district:
+resolve cautiously, confidence low/medium, and ask district if ambiguous.
 
 8. Weather plan
 
@@ -355,6 +402,7 @@ Weather forecast answer
 Always show:
 
 location used
+whether location came from GPS, pincode, or village text
 forecast generated time
 next 3 days
 rain chance
@@ -363,6 +411,22 @@ humidity if available
 wind if available
 source confidence
 long-range note if rain appears after day 3
+
+Location confidence text:
+
+If GPS:
+
+📍 मौसम रिपोर्ट: आपकी भेजी हुई लोकेशन के आधार पर
+
+If pincode:
+
+📍 मौसम रिपोर्ट: आपके पिनकोड क्षेत्र के आधार पर
+नोट: यह अनुमानित लोकेशन है। ज्यादा सटीक मौसम के लिए WhatsApp location भेजें।
+
+If village text:
+
+📍 मौसम रिपोर्ट: आपके बताए गांव/जिले के आधार पर
+अगर मौसम बहुत जरूरी है, तो Current Location भेज दें।
 
 Example:
 

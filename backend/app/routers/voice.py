@@ -1,106 +1,122 @@
 """
-Voice Upload Router - Audio File Storage for Dataset Collection
-Intercept → Save → Transcribe → Respond
+Voice upload router for consented dataset collection.
 """
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
-from app.database.db import get_db
-import aiosqlite
 import logging
-from datetime import datetime
 from pathlib import Path
-import shutil
+from typing import Optional
+
+import aiosqlite
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+
+from app.core.security import redacted_identifier, verify_admin_key
+from app.core.uploads import (
+    ALLOWED_AUDIO_MIME_TYPES,
+    ALLOWED_AUDIO_SUFFIXES,
+    max_audio_size_mb,
+    save_bounded_upload,
+)
+from app.database.db import get_db
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter()
 
-# Voice storage directory
 VOICE_STORAGE_DIR = Path("./data/voices")
-VOICE_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @router.post("/upload-voice")
 async def upload_voice(
     uid: str = Form(...),
     audio: UploadFile = File(...),
-    db: aiosqlite.Connection = Depends(get_db)
+    consent_granted: bool = Form(False),
+    dialect_guess: Optional[str] = Form(None),
+    location_hint: Optional[str] = Form(None),
+    crop_hint: Optional[str] = Form(None),
+    intent: Optional[str] = Form(None),
+    db: aiosqlite.Connection = Depends(get_db),
 ):
     """
-    Phase 2: Voice Vault
-    
-    1. Intercept: Receive audio file
-    2. Save: Store to data/voices/{uid}_{timestamp}.wav
-    3. Log: Record in database
-    4. Transcribe: Send to Gemini (future step)
-    
-    Returns: Transcription and AI response
+    Store a consented farmer audio clip for transcription and dataset building.
     """
+    file_path: Optional[Path] = None
     try:
-        # Generate unique filename: {uid}_{timestamp}.wav
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{uid}_{timestamp}.wav"
-        file_path = VOICE_STORAGE_DIR / filename
-        
-        logger.info(f"🎤 Saving voice file: {filename}")
-        
-        # Save the audio file to disk
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(audio.file, buffer)
-        
-        file_size = file_path.stat().st_size
-        logger.info(f"✅ Voice file saved: {file_size} bytes")
-        
-        # Log voice interaction to database
-        await db.execute(
-            """INSERT INTO voice_logs (user_id, file_path, file_size, created_at)
-               VALUES (?, ?, ?, CURRENT_TIMESTAMP)""",
-            (uid, str(file_path), file_size)
+        if not consent_granted:
+            raise HTTPException(status_code=400, detail="Voice storage requires explicit consent")
+
+        _filename, file_path, file_size = await save_bounded_upload(
+            upload=audio,
+            destination_dir=VOICE_STORAGE_DIR,
+            owner_id=uid,
+            allowed_mime_types=ALLOWED_AUDIO_MIME_TYPES,
+            allowed_suffixes=ALLOWED_AUDIO_SUFFIXES,
+            max_size_mb=max_audio_size_mb(),
+        )
+
+        logger.info(
+            "Voice file saved for uid_hash=%s bytes=%s",
+            redacted_identifier(uid),
+            file_size,
+        )
+
+        cursor = await db.execute(
+            """INSERT INTO voice_logs
+               (user_id, file_path, file_size, consent_granted, dialect_guess,
+                location_hint, crop_hint, intent, created_at)
+               VALUES (?, ?, ?, 1, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+            (uid, str(file_path), file_size, dialect_guess, location_hint, crop_hint, intent),
         )
         await db.commit()
-        
-        # TODO: Send to Gemini for transcription
-        # For now, return success message
+
         return {
             "status": "success",
             "message": "Voice file saved successfully",
-            "filename": filename,
+            "voice_log_id": cursor.lastrowid,
             "file_size": file_size,
-            "note": "Transcription coming soon - dataset collection active"
+            "note": "Transcription coming soon - dataset collection active",
         }
-        
-    except Exception as e:
-        logger.error(f"Error saving voice file: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to save voice file: {str(e)}")
+
+    except HTTPException:
+        if file_path and file_path.exists():
+            file_path.unlink()
+        raise
+    except Exception as exc:
+        if file_path and file_path.exists():
+            file_path.unlink()
+        logger.error("Error saving voice file: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to save voice file") from exc
 
 
-@router.get("/voice-stats")
+@router.get("/voice-stats", dependencies=[Depends(verify_admin_key)])
 async def get_voice_stats(db: aiosqlite.Connection = Depends(get_db)):
-    """Get statistics about collected voice data"""
+    """Return aggregate voice dataset stats for admins."""
     try:
-        # Count total voice files
-        cursor = await db.execute("SELECT COUNT(*), SUM(file_size) FROM voice_logs")
+        cursor = await db.execute(
+            """SELECT COUNT(*), SUM(file_size),
+                      SUM(CASE WHEN consent_granted = 1 THEN 1 ELSE 0 END)
+               FROM voice_logs"""
+        )
         row = await cursor.fetchone()
-        
+
         total_files = row[0] if row else 0
         total_size_bytes = row[1] if row and row[1] else 0
+        consented_files = row[2] if row and row[2] else 0
         total_size_mb = round(total_size_bytes / (1024 * 1024), 2)
-        
-        # Count unique users
+
         cursor = await db.execute("SELECT COUNT(DISTINCT user_id) FROM voice_logs")
         unique_users = (await cursor.fetchone())[0]
-        
+
         return {
             "total_voice_files": total_files,
+            "consented_voice_files": consented_files,
             "total_size_mb": total_size_mb,
             "unique_users": unique_users,
-            "storage_path": str(VOICE_STORAGE_DIR)
         }
-        
-    except Exception as e:
-        logger.error(f"Error getting voice stats: {e}")
+
+    except Exception as exc:
+        logger.error("Error getting voice stats: %s", exc)
         return {
             "total_voice_files": 0,
+            "consented_voice_files": 0,
             "total_size_mb": 0,
             "unique_users": 0,
-            "error": str(e)
+            "error": "Unable to load voice stats",
         }

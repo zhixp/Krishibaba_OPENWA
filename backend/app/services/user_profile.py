@@ -22,7 +22,9 @@ class UserProfileService:
         try:
             cursor = await db.execute(
                 """SELECT name, crops, default_district, lat, long,
-                          crop_summary, location_data
+                          crop_summary, location_data, gps_lat, gps_lon,
+                          village, state, location_source, location_confidence,
+                          default_pincode
                    FROM users
                    WHERE uid = ?""",
                 (uid,)
@@ -36,10 +38,20 @@ class UserProfileService:
                 "name": row[0] or "भाई",
                 "crops": row[1].split(",") if row[1] else [],
                 "location": row[2] or "Unknown",
-                "lat": row[3],
-                "long": row[4],
+                "lat": row[7] if row[7] is not None else row[3],
+                "long": row[8] if row[8] is not None else row[4],
+                "fallback_lat": row[3],
+                "fallback_long": row[4],
                 "crop_summary": row[5] or "",
-                "location_data": json.loads(row[6]) if row[6] else {}
+                "location_data": json.loads(row[6]) if row[6] else {},
+                "gps_lat": row[7],
+                "gps_lon": row[8],
+                "village": row[9],
+                "state": row[10],
+                "location_source": row[11] or "unknown",
+                "location_confidence": row[12] or "low",
+                "pincode": row[13],
+                "is_location_approximate": (row[11] or "unknown") != "gps",
             }
             
         except Exception as e:
@@ -61,6 +73,9 @@ class UserProfileService:
         
         if profile['location']:
             context_parts.append(f"इलाका: {profile['location']}")
+
+        if profile.get('location_source') and profile['location_source'] != "unknown":
+            context_parts.append(f"लोकेशन स्रोत: {profile['location_source']} ({profile['location_confidence']})")
         
         if profile['crop_summary']:
             context_parts.append(f"नोट्स: {profile['crop_summary']}")
@@ -128,8 +143,18 @@ class UserProfileService:
             "location": "Unknown",
             "lat": None,
             "long": None,
+            "fallback_lat": None,
+            "fallback_long": None,
             "crop_summary": "",
-            "location_data": {}
+            "location_data": {},
+            "gps_lat": None,
+            "gps_lon": None,
+            "village": None,
+            "state": None,
+            "location_source": "unknown",
+            "location_confidence": "low",
+            "pincode": None,
+            "is_location_approximate": True,
         }
 
 

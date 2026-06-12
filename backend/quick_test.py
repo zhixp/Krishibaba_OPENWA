@@ -1,31 +1,31 @@
-import requests
 import os
+
+import requests
 from dotenv import load_dotenv
+
 
 load_dotenv()
 
 url = "http://localhost:8000/v1/broadcast/send"
-admin_key = os.getenv("BROADCAST_ADMIN_KEY", "").strip()  # Strip whitespace
+admin_key = (os.getenv("BROADCAST_ADMIN_KEY") or os.getenv("ADMIN_API_KEY") or "").strip()
 
-# If .env not working, use direct value
 if not admin_key:
-    admin_key = "SarpanchAI@7007"
+    raise RuntimeError("Set BROADCAST_ADMIN_KEY or ADMIN_API_KEY before running this test")
 
 data = {
-    "admin_key": admin_key,
     "pincode": "all",
     "crop": "all",
-    "message_text": "Test message - यह टेस्ट है!"
+    "message_text": "Test broadcast message",
 }
+headers = {"X-API-Key": admin_key}
 
 print("Testing broadcast...")
 print(f"URL: {url}")
-print(f"Admin Key: '{admin_key}'")
-print(f"Key Length: {len(admin_key)}")
+print(f"Admin Key Length: {len(admin_key)}")
 
 try:
-    r = requests.post(url, json=data, timeout=5)
-    print(f"\nStatus: {r.status_code}")
-    print(f"Response:\n{r.text}")
-except Exception as e:
-    print(f"Error: {e}")
+    response = requests.post(url, json=data, headers=headers, timeout=5)
+    print(f"\nStatus: {response.status_code}")
+    print(f"Response:\n{response.text}")
+except Exception as exc:
+    print(f"Error: {exc}")

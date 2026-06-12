@@ -33,6 +33,12 @@ async def init_db():
                 default_district TEXT,
                 lat REAL,
                 long REAL,
+                gps_lat REAL,
+                gps_lon REAL,
+                village TEXT,
+                state TEXT,
+                location_source TEXT,
+                location_confidence TEXT,
                 location_data JSON,
                 crops TEXT,
                 crop_summary TEXT,  -- The Notebook
@@ -55,6 +61,36 @@ async def init_db():
         if 'crop_summary' not in existing_columns:
             logger.info("🔧 Adding missing 'crop_summary' column to users table...")
             await db.execute("ALTER TABLE users ADD COLUMN crop_summary TEXT")
+
+        user_location_columns = {
+            "gps_lat": "ALTER TABLE users ADD COLUMN gps_lat REAL",
+            "gps_lon": "ALTER TABLE users ADD COLUMN gps_lon REAL",
+            "village": "ALTER TABLE users ADD COLUMN village TEXT",
+            "state": "ALTER TABLE users ADD COLUMN state TEXT",
+            "location_source": "ALTER TABLE users ADD COLUMN location_source TEXT",
+            "location_confidence": "ALTER TABLE users ADD COLUMN location_confidence TEXT",
+        }
+        for column_name, alter_sql in user_location_columns.items():
+            if column_name not in existing_columns:
+                await db.execute(alter_sql)
+
+        await db.execute("""
+            UPDATE users
+            SET gps_lat = lat,
+                gps_lon = long,
+                location_source = COALESCE(location_source, 'gps'),
+                location_confidence = COALESCE(location_confidence, 'high')
+            WHERE lat IS NOT NULL
+              AND long IS NOT NULL
+              AND gps_lat IS NULL
+              AND gps_lon IS NULL
+              AND (location_source IS NULL OR location_source = '')
+        """)
+
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_users_location_source
+            ON users(location_source, location_confidence)
+        """)
         
         # Chat messages table for conversation memory
         await db.execute("""
@@ -222,9 +258,64 @@ async def init_db():
                 file_path TEXT NOT NULL,
                 file_size INTEGER,
                 transcription TEXT,
+                consent_granted INTEGER DEFAULT 0,
+                dialect_guess TEXT,
+                location_hint TEXT,
+                crop_hint TEXT,
+                intent TEXT,
+                confidence REAL,
+                response TEXT,
+                feedback TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(uid)
             )
+        """)
+
+        # MIGRATION: Add structured voice metadata fields to existing installs.
+        cursor = await db.execute("PRAGMA table_info(voice_logs)")
+        columns = await cursor.fetchall()
+        existing_columns = [col[1] for col in columns]
+        voice_columns = {
+            "consent_granted": "ALTER TABLE voice_logs ADD COLUMN consent_granted INTEGER DEFAULT 0",
+            "dialect_guess": "ALTER TABLE voice_logs ADD COLUMN dialect_guess TEXT",
+            "location_hint": "ALTER TABLE voice_logs ADD COLUMN location_hint TEXT",
+            "crop_hint": "ALTER TABLE voice_logs ADD COLUMN crop_hint TEXT",
+            "intent": "ALTER TABLE voice_logs ADD COLUMN intent TEXT",
+            "confidence": "ALTER TABLE voice_logs ADD COLUMN confidence REAL",
+            "response": "ALTER TABLE voice_logs ADD COLUMN response TEXT",
+            "feedback": "ALTER TABLE voice_logs ADD COLUMN feedback TEXT",
+        }
+        for column_name, alter_sql in voice_columns.items():
+            if column_name not in existing_columns:
+                await db.execute(alter_sql)
+
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_voice_logs_user_created
+            ON voice_logs(user_id, created_at DESC)
+        """)
+
+        # Uploaded images table (future disease detection)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS uploaded_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                crop_type TEXT,
+                file_size INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (uid) REFERENCES users(uid)
+            )
+        """)
+
+        cursor = await db.execute("PRAGMA table_info(uploaded_images)")
+        columns = await cursor.fetchall()
+        existing_columns = [col[1] for col in columns]
+        if "file_size" not in existing_columns:
+            await db.execute("ALTER TABLE uploaded_images ADD COLUMN file_size INTEGER")
+
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_uploaded_images_uid_created
+            ON uploaded_images(uid, created_at DESC)
         """)
         
         # User facts table (for AI training - extracted knowledge)
